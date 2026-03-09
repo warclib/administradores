@@ -43,7 +43,7 @@ const state = {
   filtroTipo: "todos",
   busqueda: "",
   adminTab: "resumen",
-  choferTab: "inicio",
+  choferTab: "resumen",
   periodoResumen: "mes",
   fechaConsulta: hoyInput()
 };
@@ -211,6 +211,15 @@ async function crearUsuarioChofer(nombre, numeroEconomico) {
     creado_en: Timestamp.now()
   };
   await addDoc(collection(db, "usuarios"), data);
+}
+
+async function borrarUsuario(usuarioId) {
+  try {
+    await deleteDoc(doc(db, "usuarios", usuarioId));
+    return { ok: true, mensaje: "Usuario borrado correctamente." };
+  } catch (e) {
+    return { ok: false, mensaje: `Error al borrar usuario: ${e.message}` };
+  }
 }
 
 async function validarLogin(nombre, password) {
@@ -392,6 +401,25 @@ function getSaldoTotalGlobal() {
   return saldo;
 }
 
+function getTotalesGlobales() {
+  let ingresos = 0;
+  let egresos = 0;
+  let saldo = 0;
+
+  for (const m of movimientosCache) {
+    const monto = Number(m.monto || 0);
+    if (m.tipo === "ingreso") {
+      ingresos += monto;
+      saldo += monto;
+    } else if (m.tipo === "egreso") {
+      egresos += monto;
+      saldo -= monto;
+    }
+  }
+
+  return { ingresos, egresos, saldo };
+}
+
 function getMovimientosFiltrados() {
   return movimientosCache.filter((m) => {
     const tipoOk = state.filtroTipo === "todos" ? true : m.tipo === state.filtroTipo;
@@ -529,7 +557,14 @@ function renderUsuariosList() {
                 | Estado: ${u.activo === false ? "Inactivo" : "Activo"}
               </div>
             </div>
-            <div class="badge">${escapeHtml(u.rol || "usuario")}</div>
+            <div class="actions">
+              <div class="badge">${escapeHtml(u.rol || "usuario")}</div>
+              ${
+                usuarioActual && usuarioActual._id !== u._id
+                  ? `<button class="btn btn-danger js-borrar-usuario" data-id="${u._id}" data-nombre="${escapeHtml(u.nombre || "")}">Borrar usuario</button>`
+                  : ""
+              }
+            </div>
           </div>
         </div>
       `).join("")}
@@ -576,8 +611,7 @@ function buildChoferTabs() {
   return `
     <div class="card">
       <div class="btn-row">
-        <button class="btn ${state.choferTab === "inicio" ? "btn-primary" : "btn-soft"} js-chofer-tab" data-tab="inicio">Inicio</button>
-        <button class="btn ${state.choferTab === "movimientos" ? "btn-primary" : "btn-soft"} js-chofer-tab" data-tab="movimientos">Movimientos</button>
+        <button class="btn btn-primary">Resumen</button>
         <button class="btn btn-danger" id="btnCerrarSesion">Cerrar sesión</button>
       </div>
     </div>
@@ -612,10 +646,10 @@ function buildHeaderChofer() {
         <div class="header-main">
           <div>
             <h2>${escapeHtml(usuarioActual?.nombre || "")}</h2>
-            <p class="header-sub">Registro de gastos y consulta de movimientos</p>
+            <p class="header-sub">Visualización de resultados</p>
           </div>
           <div>
-            <div class="header-sub">Saldo total global</div>
+            <div class="header-sub">Saldo acumulado</div>
             <div class="header-balance">${dinero(getSaldoTotalGlobal())}</div>
           </div>
         </div>
@@ -660,52 +694,10 @@ function buildMovimientoFormAdmin(prefill = {}, buttonClass = "btn-warning", but
   `;
 }
 
-function buildMovimientoFormChofer(prefill = {}, buttonClass = "btn-danger", buttonText = "Registrar gasto") {
-  return `
-    <div class="field">
-      <label>Tipo de movimiento</label>
-      <select id="movTipo" class="select" disabled>
-        <option value="egreso" selected>Egreso</option>
-      </select>
-    </div>
-
-    <div class="field">
-      <label>Número económico</label>
-      <input id="movNumero" class="input" type="text" value="${escapeHtml(prefill.numero_economico || "")}" />
-    </div>
-
-    <div class="field">
-      <label>Placa (opcional)</label>
-      <input id="movPlaca" class="input" type="text" value="${escapeHtml(prefill.placa || "")}" />
-    </div>
-
-    <div class="field">
-      <label>Monto del gasto</label>
-      <input id="movMonto" class="input" type="number" step="0.01" value="${escapeHtml(prefill.monto || "")}" />
-    </div>
-
-    <div class="field">
-      <label>Concepto / nota</label>
-      <input id="movConcepto" class="input" type="text" value="${escapeHtml(prefill.concepto || "")}" />
-    </div>
-
-    <div class="btn-row">
-      <button id="btnGuardarMovimiento" class="btn ${buttonClass}">${buttonText}</button>
-    </div>
-  `;
-}
-
 function attachTabListeners() {
   document.querySelectorAll(".js-admin-tab").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.adminTab = btn.dataset.tab;
-      render();
-    });
-  });
-
-  document.querySelectorAll(".js-chofer-tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      state.choferTab = btn.dataset.tab;
       render();
     });
   });
@@ -755,7 +747,7 @@ function attachCommonSessionButton() {
       limpiarMensaje();
       detenerSuscripciones();
       state.adminTab = "resumen";
-      state.choferTab = "inicio";
+      state.choferTab = "resumen";
       render();
     });
   }
@@ -779,11 +771,9 @@ function iniciarSuscripcionMovimientos() {
 
   unsubscribeMovimientos = onSnapshot(
     q,
-    () => {
-      getDocs(q).then((snapshot) => {
-        movimientosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
-        render();
-      });
+    (snapshot) => {
+      movimientosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
+      render();
     },
     (error) => {
       console.error("Error en suscripción movimientos:", error);
@@ -868,6 +858,26 @@ function attachAdminMovementActions() {
   });
 }
 
+function attachAdminUserActions() {
+  document.querySelectorAll(".js-borrar-usuario").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const nombre = btn.dataset.nombre || "este usuario";
+
+      const ok = confirm(`¿Seguro que deseas borrar al usuario ${nombre}?`);
+      if (!ok) return;
+
+      const r = await borrarUsuario(id);
+      if (!r.ok) {
+        setMensaje(r.mensaje, "error");
+        return;
+      }
+
+      setMensaje(r.mensaje, "success");
+    });
+  });
+}
+
 function renderLogin() {
   appRoot.innerHTML = `
     <div class="login-wrap">
@@ -931,48 +941,7 @@ function renderLogin() {
 }
 
 function renderChofer() {
-  const resumen = calcularResumenPorPeriodo(
-    movimientosCache,
-    state.periodoResumen,
-    state.fechaConsulta
-  );
-
-  let contenido = "";
-
-  if (state.choferTab === "inicio") {
-    contenido = `
-      <div class="grid grid-2">
-        <div class="card">
-          <h2 class="section-title">Registrar gasto</h2>
-          ${buildMovimientoFormChofer(
-            { numero_economico: usuarioActual?.numero_economico || "" },
-            "btn-danger",
-            "Registrar gasto"
-          )}
-        </div>
-
-        <div class="card">
-          <h2 class="section-title">Consulta rápida</h2>
-          ${buildFiltroPanel()}
-          <div class="grid grid-3 stats">
-            ${statCard("Ingresos del periodo", resumen.ingresos, "blue")}
-            ${statCard("Egresos del periodo", resumen.egresos, "red")}
-            ${statCard("Saldo del periodo", resumen.saldo, "green")}
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  if (state.choferTab === "movimientos") {
-    contenido = `
-      <div class="topbar">
-        <h2 class="section-title" style="margin:0;">Movimientos</h2>
-      </div>
-      ${buildFiltroPanel()}
-      ${renderMovimientosList(false)}
-    `;
-  }
+  const totales = getTotalesGlobales();
 
   appRoot.innerHTML = `
     ${buildHeaderChofer()}
@@ -980,33 +949,16 @@ function renderChofer() {
     <div class="container">
       ${mensajeHtml()}
       ${buildChoferTabs()}
-      ${contenido}
+
+      <div class="grid grid-3 stats">
+        ${statCard("Total ingresado", totales.ingresos, "blue")}
+        ${statCard("Total gastado", totales.egresos, "red")}
+        ${statCard("Total ahorrado", totales.saldo, "green")}
+      </div>
     </div>
   `;
 
-  attachTabListeners();
   attachCommonSessionButton();
-  attachFiltrosListeners();
-
-  const btnGuardar = document.getElementById("btnGuardarMovimiento");
-  if (btnGuardar) {
-    btnGuardar.addEventListener("click", async () => {
-      const tipo = "egreso";
-      const numero = document.getElementById("movNumero").value;
-      const placa = document.getElementById("movPlaca").value;
-      const monto = document.getElementById("movMonto").value;
-      const concepto = document.getElementById("movConcepto").value;
-
-      const r = await guardarOperacion(tipo, numero, placa, monto, concepto, usuarioActual);
-
-      if (!r.ok) {
-        setMensaje(r.mensaje, "error");
-        return;
-      }
-
-      setMensaje(r.mensaje, "success");
-    });
-  }
 }
 
 function renderAdmin() {
@@ -1112,6 +1064,7 @@ function renderAdmin() {
   attachCommonSessionButton();
   attachFiltrosListeners();
   attachAdminMovementActions();
+  attachAdminUserActions();
 
   const btnGuardar = document.getElementById("btnGuardarMovimiento");
   if (btnGuardar) {

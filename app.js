@@ -15,10 +15,6 @@ import {
   onSnapshot
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-/*
-  REEMPLAZA ESTO CON TU CONFIG REAL DE FIREBASE WEB
-*/
-// Your web app's Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyAvXzB0423tB-WlHFo2T77ijPM__r3BXl4",
   authDomain: "sistema-otimac.firebaseapp.com",
@@ -47,10 +43,15 @@ const state = {
   busqueda: ""
 };
 
-modalClose.addEventListener("click", cerrarModal);
-modalOverlay.addEventListener("click", (e) => {
-  if (e.target === modalOverlay) cerrarModal();
-});
+if (modalClose) {
+  modalClose.addEventListener("click", cerrarModal);
+}
+
+if (modalOverlay) {
+  modalOverlay.addEventListener("click", (e) => {
+    if (e.target === modalOverlay) cerrarModal();
+  });
+}
 
 function guardarSesion(usuario) {
   localStorage.setItem("otimac_usuario", JSON.stringify(usuario));
@@ -148,12 +149,15 @@ function mensajeHtml() {
 }
 
 function abrirModal(titulo, html) {
-  document.getElementById("modalTitle").textContent = titulo;
+  if (!modalOverlay || !modalBody) return;
+  const title = document.getElementById("modalTitle");
+  if (title) title.textContent = titulo;
   modalBody.innerHTML = html;
   modalOverlay.classList.remove("hidden");
 }
 
 function cerrarModal() {
+  if (!modalOverlay || !modalBody) return;
   modalOverlay.classList.add("hidden");
   modalBody.innerHTML = "";
 }
@@ -594,13 +598,18 @@ function iniciarSuscripcionMovimientos() {
     orderBy("fecha", "desc")
   );
 
-  unsubscribeMovimientos = onSnapshot(q, async (snapshot) => {
-    movimientosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
-    resumenCache = await calcularResumenDesdeLista(movimientosCache);
-    render();
-  }, (error) => {
-    setMensaje(`Error al leer movimientos en tiempo real: ${error.message}`, "error");
-  });
+  unsubscribeMovimientos = onSnapshot(
+    q,
+    async (snapshot) => {
+      movimientosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
+      resumenCache = await calcularResumenDesdeLista(movimientosCache);
+      render();
+    },
+    (error) => {
+      console.error("Error en suscripción:", error);
+      setMensaje(`Error al leer movimientos en tiempo real: ${error.message}`, "error");
+    }
+  );
 }
 
 function openEditarMovimientoModal(mov) {
@@ -613,6 +622,8 @@ function openEditarMovimientoModal(mov) {
   );
 
   const btn = document.getElementById("btnGuardarMovimiento");
+  if (!btn) return;
+
   btn.addEventListener("click", async () => {
     const tipo = document.getElementById("movTipo").value;
     const numero = document.getElementById("movNumero").value;
@@ -624,7 +635,9 @@ function openEditarMovimientoModal(mov) {
 
     const modalMsg = document.getElementById("modalMsg");
     if (!r.ok) {
-      modalMsg.innerHTML = `<div class="message error">${escapeHtml(r.mensaje)}</div>`;
+      if (modalMsg) {
+        modalMsg.innerHTML = `<div class="message error">${escapeHtml(r.mensaje)}</div>`;
+      }
       return;
     }
 
@@ -691,7 +704,7 @@ function renderLogin() {
         <hr class="sep">
 
         <p class="small center" style="margin:0;">
-          Admins iniciales:<br>
+          Admins sugeridos para crear manualmente:<br>
           <span class="code">Presidente / presi123</span><br>
           <span class="code">Secretario / secre123</span><br>
           <span class="code">Vigilancia / vigila123</span>
@@ -700,7 +713,10 @@ function renderLogin() {
     </div>
   `;
 
-  document.getElementById("btnLogin").addEventListener("click", async () => {
+  const btnLogin = document.getElementById("btnLogin");
+  if (!btnLogin) return;
+
+  btnLogin.addEventListener("click", async () => {
     const nombre = document.getElementById("loginNombre").value;
     const password = document.getElementById("loginPassword").value;
 
@@ -716,9 +732,15 @@ function renderLogin() {
       guardarSesion(usuarioActual);
       limpiarMensaje();
 
-      if (!unsubscribeMovimientos) iniciarSuscripcionMovimientos();
+      try {
+        if (!unsubscribeMovimientos) iniciarSuscripcionMovimientos();
+      } catch (e) {
+        console.error("Error al iniciar suscripción:", e);
+      }
+
       render();
     } catch (e) {
+      console.error("Error de login:", e);
       setMensaje(`Error de inicio de sesión: ${e.message}`, "error");
     }
   });
@@ -774,7 +796,10 @@ function renderChofer() {
   attachCommonSessionButton();
   attachToolbarListeners();
 
-  document.getElementById("btnGuardarMovimiento").addEventListener("click", async () => {
+  const btnGuardar = document.getElementById("btnGuardarMovimiento");
+  if (!btnGuardar) return;
+
+  btnGuardar.addEventListener("click", async () => {
     const tipo = document.getElementById("movTipo").value;
     const numero = document.getElementById("movNumero").value;
     const placa = document.getElementById("movPlaca").value;
@@ -884,74 +909,83 @@ function renderAdmin() {
   attachToolbarListeners();
   attachAdminMovementActions();
 
-  document.getElementById("btnGuardarMovimiento").addEventListener("click", async () => {
-    const tipo = document.getElementById("movTipo").value;
-    const numero = document.getElementById("movNumero").value;
-    const placa = document.getElementById("movPlaca").value;
-    const monto = document.getElementById("movMonto").value;
-    const concepto = document.getElementById("movConcepto").value;
+  const btnGuardar = document.getElementById("btnGuardarMovimiento");
+  if (btnGuardar) {
+    btnGuardar.addEventListener("click", async () => {
+      const tipo = document.getElementById("movTipo").value;
+      const numero = document.getElementById("movNumero").value;
+      const placa = document.getElementById("movPlaca").value;
+      const monto = document.getElementById("movMonto").value;
+      const concepto = document.getElementById("movConcepto").value;
 
-    const r = await guardarOperacion(tipo, numero, placa, monto, concepto, usuarioActual);
+      const r = await guardarOperacion(tipo, numero, placa, monto, concepto, usuarioActual);
 
-    if (!r.ok) {
-      setMensaje(r.mensaje, "error");
-      return;
-    }
+      if (!r.ok) {
+        setMensaje(r.mensaje, "error");
+        return;
+      }
 
-    setMensaje(r.mensaje, "success");
-  });
-
-  document.getElementById("btnCrearChofer").addEventListener("click", async () => {
-    const nombre = document.getElementById("choferNombre").value.trim();
-    const numero = document.getElementById("choferNumero").value.trim();
-
-    if (!nombre || !numero) {
-      setMensaje("Debes capturar nombre y número económico del chofer.", "error");
-      return;
-    }
-
-    if (!/^\d+$/.test(numero)) {
-      setMensaje("El número económico debe ser numérico.", "error");
-      return;
-    }
-
-    const existente = await obtenerUsuarioPorNombre(nombre);
-    if (existente) {
-      setMensaje("Ya existe un usuario con ese nombre.", "error");
-      return;
-    }
-
-    await crearUsuarioChofer(nombre, numero);
-    setMensaje("Chofer creado correctamente.", "success");
-  });
-
-  document.getElementById("btnCrearAdmin").addEventListener("click", async () => {
-    const nombre = document.getElementById("adminNombre").value.trim();
-    const password = document.getElementById("adminPass").value.trim();
-
-    if (!nombre || !password) {
-      setMensaje("Debes capturar nombre y contraseña del administrador.", "error");
-      return;
-    }
-
-    const existente = await obtenerUsuarioPorNombre(nombre);
-    if (existente) {
-      setMensaje("Ya existe un usuario con ese nombre.", "error");
-      return;
-    }
-
-    await addDoc(collection(db, "usuarios"), {
-      nombre,
-      nombre_key: claveNombre(nombre),
-      rol: "admin",
-      password,
-      numero_economico: "",
-      activo: true,
-      creado_en: Timestamp.now()
+      setMensaje(r.mensaje, "success");
     });
+  }
 
-    setMensaje("Administrador creado correctamente.", "success");
-  });
+  const btnCrearChofer = document.getElementById("btnCrearChofer");
+  if (btnCrearChofer) {
+    btnCrearChofer.addEventListener("click", async () => {
+      const nombre = document.getElementById("choferNombre").value.trim();
+      const numero = document.getElementById("choferNumero").value.trim();
+
+      if (!nombre || !numero) {
+        setMensaje("Debes capturar nombre y número económico del chofer.", "error");
+        return;
+      }
+
+      if (!/^\d+$/.test(numero)) {
+        setMensaje("El número económico debe ser numérico.", "error");
+        return;
+      }
+
+      const existente = await obtenerUsuarioPorNombre(nombre);
+      if (existente) {
+        setMensaje("Ya existe un usuario con ese nombre.", "error");
+        return;
+      }
+
+      await crearUsuarioChofer(nombre, numero);
+      setMensaje("Chofer creado correctamente.", "success");
+    });
+  }
+
+  const btnCrearAdmin = document.getElementById("btnCrearAdmin");
+  if (btnCrearAdmin) {
+    btnCrearAdmin.addEventListener("click", async () => {
+      const nombre = document.getElementById("adminNombre").value.trim();
+      const password = document.getElementById("adminPass").value.trim();
+
+      if (!nombre || !password) {
+        setMensaje("Debes capturar nombre y contraseña del administrador.", "error");
+        return;
+      }
+
+      const existente = await obtenerUsuarioPorNombre(nombre);
+      if (existente) {
+        setMensaje("Ya existe un usuario con ese nombre.", "error");
+        return;
+      }
+
+      await addDoc(collection(db, "usuarios"), {
+        nombre,
+        nombre_key: claveNombre(nombre),
+        rol: "admin",
+        password,
+        numero_economico: "",
+        activo: true,
+        creado_en: Timestamp.now()
+      });
+
+      setMensaje("Administrador creado correctamente.", "success");
+    });
+  }
 }
 
 function render() {
@@ -967,6 +1001,7 @@ function render() {
       renderChofer();
     }
   } catch (e) {
+    console.error("Error en render:", e);
     appRoot.innerHTML = `
       <div class="container">
         <div class="card">
@@ -980,23 +1015,26 @@ function render() {
 
 async function init() {
   try {
-    await crearAdministradoresIniciales();
+    render();
 
     if (usuarioActual) {
-      iniciarSuscripcionMovimientos();
+      try {
+        iniciarSuscripcionMovimientos();
+      } catch (e) {
+        console.error("Error con la suscripción:", e);
+        setMensaje("No se pudo conectar con Firestore. Revisa reglas y configuración.", "error");
+      }
     }
 
-    render();
+    // Si luego quieres crear admins automáticos, descomenta esta línea:
+    // await crearAdministradoresIniciales();
+
   } catch (e) {
-    appRoot.innerHTML = `
-      <div class="container">
-        <div class="card">
-          <h2 class="section-title">Error al iniciar</h2>
-          <p>${escapeHtml(e.message)}</p>
-          <p class="small">
-            Revisa la configuración de Firebase en <span class="code">app.js</span>.
-          </p>
-        </div>
+    console.error("Error al iniciar:", e);
+    document.body.innerHTML = `
+      <div style="padding:20px;font-family:Arial,sans-serif;">
+        <h2>Error al iniciar</h2>
+        <pre style="white-space:pre-wrap;background:#f3f3f3;padding:12px;border-radius:8px;">${escapeHtml(e.message)}</pre>
       </div>
     `;
   }

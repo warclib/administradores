@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import {
   getFirestore,
   collection,
- addDoc,
+  addDoc,
   getDocs,
   query,
   where,
@@ -36,7 +36,6 @@ let usuarioActual = cargarSesion();
 let mensajeActual = { texto: "", tipo: "" };
 let movimientosCache = [];
 let usuariosCache = [];
-let resumenCache = null;
 let unsubscribeMovimientos = null;
 let unsubscribeUsuarios = null;
 
@@ -44,7 +43,9 @@ const state = {
   filtroTipo: "todos",
   busqueda: "",
   adminTab: "resumen",
-  choferTab: "inicio"
+  choferTab: "inicio",
+  periodoResumen: "mes",
+  fechaConsulta: hoyInput()
 };
 
 if (modalClose) {
@@ -55,6 +56,14 @@ if (modalOverlay) {
   modalOverlay.addEventListener("click", (e) => {
     if (e.target === modalOverlay) cerrarModal();
   });
+}
+
+function hoyInput() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
 }
 
 function guardarSesion(usuario) {
@@ -119,6 +128,12 @@ function inicioDelDia(dt) {
   return x;
 }
 
+function finDelDia(dt) {
+  const x = new Date(dt);
+  x.setHours(23, 59, 59, 999);
+  return x;
+}
+
 function inicioDeSemana(dt) {
   const base = inicioDelDia(dt);
   const day = base.getDay();
@@ -131,6 +146,12 @@ function inicioDeMes(dt) {
   const x = new Date(dt);
   x.setDate(1);
   x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function finDeMes(dt) {
+  const x = new Date(dt.getFullYear(), dt.getMonth() + 1, 0);
+  x.setHours(23, 59, 59, 999);
   return x;
 }
 
@@ -314,49 +335,61 @@ async function borrarMovimiento(movId) {
   }
 }
 
-async function calcularResumenDesdeLista(lista) {
+function calcularResumenPorPeriodo(lista, periodo, fechaTexto) {
   const resumen = {
-    ingresos_hoy: 0,
-    egresos_hoy: 0,
-    ingresos_semana: 0,
-    egresos_semana: 0,
-    ingresos_mes: 0,
-    egresos_mes: 0,
-    saldo_total: 0
+    ingresos: 0,
+    egresos: 0,
+    saldo: 0
   };
 
   const ahora = ahoraLocal();
-  const desdeHoy = inicioDelDia(ahora);
-  const desdeSemana = inicioDeSemana(ahora);
-  const desdeMes = inicioDeMes(ahora);
+  let desde = null;
+  let hasta = null;
+
+  if (periodo === "hoy") {
+    desde = inicioDelDia(ahora);
+    hasta = finDelDia(ahora);
+  } else if (periodo === "semana") {
+    desde = inicioDeSemana(ahora);
+    hasta = finDelDia(ahora);
+  } else if (periodo === "mes") {
+    desde = inicioDeMes(ahora);
+    hasta = finDeMes(ahora);
+  } else if (periodo === "fecha" && fechaTexto) {
+    const fecha = new Date(`${fechaTexto}T00:00:00`);
+    desde = inicioDelDia(fecha);
+    hasta = finDelDia(fecha);
+  }
 
   for (const m of lista) {
     const monto = Number(m.monto || 0);
     const tipo = m.tipo || "";
     const fecha = normalizarFecha(m.fecha);
-
-    if (tipo === "ingreso") resumen.saldo_total += monto;
-    else resumen.saldo_total -= monto;
-
     if (!fecha) continue;
 
-    if (fecha >= desdeHoy) {
-      if (tipo === "ingreso") resumen.ingresos_hoy += monto;
-      else resumen.egresos_hoy += monto;
-    }
+    const dentro = (!desde || fecha >= desde) && (!hasta || fecha <= hasta);
+    if (!dentro) continue;
 
-    if (fecha >= desdeSemana) {
-      if (tipo === "ingreso") resumen.ingresos_semana += monto;
-      else resumen.egresos_semana += monto;
-    }
-
-    if (fecha >= desdeMes) {
-      if (tipo === "ingreso") resumen.ingresos_mes += monto;
-      else resumen.egresos_mes += monto;
+    if (tipo === "ingreso") {
+      resumen.ingresos += monto;
+      resumen.saldo += monto;
+    } else {
+      resumen.egresos += monto;
+      resumen.saldo -= monto;
     }
   }
 
   return resumen;
+}
+
+function getSaldoTotalGlobal() {
+  let saldo = 0;
+  for (const m of movimientosCache) {
+    const monto = Number(m.monto || 0);
+    if (m.tipo === "ingreso") saldo += monto;
+    else saldo -= monto;
+  }
+  return saldo;
 }
 
 function getMovimientosFiltrados() {
@@ -378,6 +411,37 @@ function getMovimientosFiltrados() {
   });
 }
 
+function getMovimientosPorPeriodo() {
+  const lista = getMovimientosFiltrados();
+  const periodo = state.periodoResumen;
+  const fechaTexto = state.fechaConsulta;
+  const ahora = ahoraLocal();
+
+  let desde = null;
+  let hasta = null;
+
+  if (periodo === "hoy") {
+    desde = inicioDelDia(ahora);
+    hasta = finDelDia(ahora);
+  } else if (periodo === "semana") {
+    desde = inicioDeSemana(ahora);
+    hasta = finDelDia(ahora);
+  } else if (periodo === "mes") {
+    desde = inicioDeMes(ahora);
+    hasta = finDeMes(ahora);
+  } else if (periodo === "fecha" && fechaTexto) {
+    const fecha = new Date(`${fechaTexto}T00:00:00`);
+    desde = inicioDelDia(fecha);
+    hasta = finDelDia(fecha);
+  }
+
+  return lista.filter((m) => {
+    const fecha = normalizarFecha(m.fecha);
+    if (!fecha) return false;
+    return (!desde || fecha >= desde) && (!hasta || fecha <= hasta);
+  });
+}
+
 function getUsuariosOrdenados() {
   return [...usuariosCache].sort((a, b) => {
     const an = (a.nombre || "").toLowerCase();
@@ -396,10 +460,10 @@ function statCard(label, value, cls) {
 }
 
 function renderMovimientosList(esAdmin = false) {
-  const lista = getMovimientosFiltrados();
+  const lista = getMovimientosPorPeriodo();
 
   if (!lista.length) {
-    return `<div class="card empty">No hay movimientos que coincidan con los filtros actuales.</div>`;
+    return `<div class="card empty">No hay movimientos para el periodo seleccionado.</div>`;
   }
 
   return `
@@ -473,7 +537,7 @@ function renderUsuariosList() {
   `;
 }
 
-function buildToolbar() {
+function buildFiltroPanel() {
   return `
     <div class="card">
       <div class="toolbar">
@@ -483,6 +547,13 @@ function buildToolbar() {
           <option value="ingreso" ${state.filtroTipo === "ingreso" ? "selected" : ""}>Ingresos</option>
           <option value="egreso" ${state.filtroTipo === "egreso" ? "selected" : ""}>Egresos</option>
         </select>
+        <select id="periodoResumen" class="select">
+          <option value="hoy" ${state.periodoResumen === "hoy" ? "selected" : ""}>Hoy</option>
+          <option value="semana" ${state.periodoResumen === "semana" ? "selected" : ""}>Semana</option>
+          <option value="mes" ${state.periodoResumen === "mes" ? "selected" : ""}>Mes</option>
+          <option value="fecha" ${state.periodoResumen === "fecha" ? "selected" : ""}>Por fecha</option>
+        </select>
+        <input id="fechaConsulta" class="input" type="date" value="${escapeHtml(state.fechaConsulta)}" ${state.periodoResumen === "fecha" ? "" : "disabled"} />
       </div>
     </div>
   `;
@@ -513,7 +584,7 @@ function buildChoferTabs() {
   `;
 }
 
-function buildHeaderAdmin(resumen) {
+function buildHeaderAdmin() {
   return `
     <div class="header admin">
       <div class="header-inner">
@@ -524,8 +595,8 @@ function buildHeaderAdmin(resumen) {
             <p class="header-sub">Panel de control de caja general</p>
           </div>
           <div>
-            <div class="header-sub">Saldo total</div>
-            <div class="header-balance">${dinero(resumen.saldo_total)}</div>
+            <div class="header-sub">Saldo total global</div>
+            <div class="header-balance">${dinero(getSaldoTotalGlobal())}</div>
           </div>
         </div>
       </div>
@@ -533,7 +604,7 @@ function buildHeaderAdmin(resumen) {
   `;
 }
 
-function buildHeaderChofer(resumen) {
+function buildHeaderChofer() {
   return `
     <div class="header">
       <div class="header-inner">
@@ -541,11 +612,11 @@ function buildHeaderChofer(resumen) {
         <div class="header-main">
           <div>
             <h2>${escapeHtml(usuarioActual?.nombre || "")}</h2>
-            <p class="header-sub">Captura rápida de movimientos</p>
+            <p class="header-sub">Registro de gastos y consulta de movimientos</p>
           </div>
           <div>
-            <div class="header-sub">Saldo actual</div>
-            <div class="header-balance">${dinero(resumen.saldo_total)}</div>
+            <div class="header-sub">Saldo total global</div>
+            <div class="header-balance">${dinero(getSaldoTotalGlobal())}</div>
           </div>
         </div>
       </div>
@@ -553,12 +624,12 @@ function buildHeaderChofer(resumen) {
   `;
 }
 
-function buildMovimientoForm(prefill = {}, buttonClass = "btn-accent", buttonText = "Guardar movimiento") {
+function buildMovimientoFormAdmin(prefill = {}, buttonClass = "btn-warning", buttonText = "Guardar movimiento") {
   return `
     <div class="field">
       <label>Tipo de movimiento</label>
       <select id="movTipo" class="select">
-        <option value="ingreso" ${prefill.tipo === "egreso" ? "" : "selected"}>Ingreso</option>
+        <option value="ingreso" ${prefill.tipo === "ingreso" ? "selected" : ""}>Ingreso</option>
         <option value="egreso" ${prefill.tipo === "egreso" ? "selected" : ""}>Egreso</option>
       </select>
     </div>
@@ -589,6 +660,41 @@ function buildMovimientoForm(prefill = {}, buttonClass = "btn-accent", buttonTex
   `;
 }
 
+function buildMovimientoFormChofer(prefill = {}, buttonClass = "btn-danger", buttonText = "Registrar gasto") {
+  return `
+    <div class="field">
+      <label>Tipo de movimiento</label>
+      <select id="movTipo" class="select" disabled>
+        <option value="egreso" selected>Egreso</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Número económico</label>
+      <input id="movNumero" class="input" type="text" value="${escapeHtml(prefill.numero_economico || "")}" />
+    </div>
+
+    <div class="field">
+      <label>Placa (opcional)</label>
+      <input id="movPlaca" class="input" type="text" value="${escapeHtml(prefill.placa || "")}" />
+    </div>
+
+    <div class="field">
+      <label>Monto del gasto</label>
+      <input id="movMonto" class="input" type="number" step="0.01" value="${escapeHtml(prefill.monto || "")}" />
+    </div>
+
+    <div class="field">
+      <label>Concepto / nota</label>
+      <input id="movConcepto" class="input" type="text" value="${escapeHtml(prefill.concepto || "")}" />
+    </div>
+
+    <div class="btn-row">
+      <button id="btnGuardarMovimiento" class="btn ${buttonClass}">${buttonText}</button>
+    </div>
+  `;
+}
+
 function attachTabListeners() {
   document.querySelectorAll(".js-admin-tab").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -605,9 +711,11 @@ function attachTabListeners() {
   });
 }
 
-function attachToolbarListeners() {
+function attachFiltrosListeners() {
   const busquedaInput = document.getElementById("busquedaInput");
   const filtroTipo = document.getElementById("filtroTipo");
+  const periodoResumen = document.getElementById("periodoResumen");
+  const fechaConsulta = document.getElementById("fechaConsulta");
 
   if (busquedaInput) {
     busquedaInput.addEventListener("input", (e) => {
@@ -619,6 +727,20 @@ function attachToolbarListeners() {
   if (filtroTipo) {
     filtroTipo.addEventListener("change", (e) => {
       state.filtroTipo = e.target.value;
+      render();
+    });
+  }
+
+  if (periodoResumen) {
+    periodoResumen.addEventListener("change", (e) => {
+      state.periodoResumen = e.target.value;
+      render();
+    });
+  }
+
+  if (fechaConsulta) {
+    fechaConsulta.addEventListener("change", (e) => {
+      state.fechaConsulta = e.target.value;
       render();
     });
   }
@@ -657,10 +779,11 @@ function iniciarSuscripcionMovimientos() {
 
   unsubscribeMovimientos = onSnapshot(
     q,
-    async (snapshot) => {
-      movimientosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
-      resumenCache = await calcularResumenDesdeLista(movimientosCache);
-      render();
+    () => {
+      getDocs(q).then((snapshot) => {
+        movimientosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
+        render();
+      });
     },
     (error) => {
       console.error("Error en suscripción movimientos:", error);
@@ -689,7 +812,7 @@ function openEditarMovimientoModal(mov) {
   abrirModal(
     "Editar movimiento",
     `
-      ${buildMovimientoForm(mov, "btn-primary", "Guardar cambios")}
+      ${buildMovimientoFormAdmin(mov, "btn-primary", "Guardar cambios")}
       <div id="modalMsg"></div>
     `
   );
@@ -771,17 +894,8 @@ function renderLogin() {
         </div>
 
         <div class="btn-row">
-          <button id="btnLogin" class="btn btn-accent" style="width:100%;">Entrar</button>
+          <button id="btnLogin" class="btn btn-warning" style="width:100%;">Entrar</button>
         </div>
-
-        <hr class="sep">
-
-        <p class="small center" style="margin:0;">
-          Admins sugeridos:<br>
-          <span class="code">Presidente / presi123</span><br>
-          <span class="code">Secretario / secre123</span><br>
-          <span class="code">Vigilancia / vigila123</span>
-        </p>
       </div>
     </div>
   `;
@@ -817,11 +931,11 @@ function renderLogin() {
 }
 
 function renderChofer() {
-  const resumen = resumenCache || {
-    ingresos_hoy: 0,
-    egresos_hoy: 0,
-    saldo_total: 0
-  };
+  const resumen = calcularResumenPorPeriodo(
+    movimientosCache,
+    state.periodoResumen,
+    state.fechaConsulta
+  );
 
   let contenido = "";
 
@@ -829,18 +943,22 @@ function renderChofer() {
     contenido = `
       <div class="grid grid-2">
         <div class="card">
-          <h2 class="section-title">Registro rápido</h2>
-          ${buildMovimientoForm(
+          <h2 class="section-title">Registrar gasto</h2>
+          ${buildMovimientoFormChofer(
             { numero_economico: usuarioActual?.numero_economico || "" },
-            "btn-accent",
-            "Guardar movimiento"
+            "btn-danger",
+            "Registrar gasto"
           )}
         </div>
 
-        <div class="grid stats">
-          ${statCard("Ingresos hoy", resumen.ingresos_hoy, "green")}
-          ${statCard("Egresos hoy", resumen.egresos_hoy, "red")}
-          ${statCard("Saldo total", resumen.saldo_total, "blue")}
+        <div class="card">
+          <h2 class="section-title">Consulta rápida</h2>
+          ${buildFiltroPanel()}
+          <div class="grid grid-3 stats">
+            ${statCard("Ingresos del periodo", resumen.ingresos, "blue")}
+            ${statCard("Egresos del periodo", resumen.egresos, "red")}
+            ${statCard("Saldo del periodo", resumen.saldo, "green")}
+          </div>
         </div>
       </div>
     `;
@@ -849,15 +967,15 @@ function renderChofer() {
   if (state.choferTab === "movimientos") {
     contenido = `
       <div class="topbar">
-        <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
+        <h2 class="section-title" style="margin:0;">Movimientos</h2>
       </div>
-      ${buildToolbar()}
+      ${buildFiltroPanel()}
       ${renderMovimientosList(false)}
     `;
   }
 
   appRoot.innerHTML = `
-    ${buildHeaderChofer(resumen)}
+    ${buildHeaderChofer()}
 
     <div class="container">
       ${mensajeHtml()}
@@ -868,12 +986,12 @@ function renderChofer() {
 
   attachTabListeners();
   attachCommonSessionButton();
-  attachToolbarListeners();
+  attachFiltrosListeners();
 
   const btnGuardar = document.getElementById("btnGuardarMovimiento");
   if (btnGuardar) {
     btnGuardar.addEventListener("click", async () => {
-      const tipo = document.getElementById("movTipo").value;
+      const tipo = "egreso";
       const numero = document.getElementById("movNumero").value;
       const placa = document.getElementById("movPlaca").value;
       const monto = document.getElementById("movMonto").value;
@@ -892,35 +1010,34 @@ function renderChofer() {
 }
 
 function renderAdmin() {
-  const resumen = resumenCache || {
-    ingresos_hoy: 0,
-    egresos_hoy: 0,
-    ingresos_semana: 0,
-    egresos_semana: 0,
-    ingresos_mes: 0,
-    egresos_mes: 0,
-    saldo_total: 0
-  };
+  const resumen = calcularResumenPorPeriodo(
+    movimientosCache,
+    state.periodoResumen,
+    state.fechaConsulta
+  );
 
   let contenido = "";
 
   if (state.adminTab === "resumen") {
     contenido = `
-      <div class="grid grid-3 stats">
-        ${statCard("Ingresos hoy", resumen.ingresos_hoy, "green")}
-        ${statCard("Egresos hoy", resumen.egresos_hoy, "red")}
-        ${statCard("Saldo total", resumen.saldo_total, "blue")}
-        ${statCard("Ingresos semana", resumen.ingresos_semana, "green")}
-        ${statCard("Egresos semana", resumen.egresos_semana, "red")}
-        ${statCard("Ingresos mes", resumen.ingresos_mes, "slate")}
-      </div>
-
-      <div class="grid grid-3" style="margin-top:16px;">
+      <div class="grid grid-2">
         <div class="card">
           <h2 class="section-title">Registrar movimiento</h2>
-          ${buildMovimientoForm({}, "btn-accent", "Guardar movimiento")}
+          ${buildMovimientoFormAdmin({}, "btn-warning", "Guardar movimiento")}
         </div>
 
+        <div class="card">
+          <h2 class="section-title">Resumen del periodo</h2>
+          ${buildFiltroPanel()}
+          <div class="grid grid-3 stats">
+            ${statCard("Ingresos", resumen.ingresos, "blue")}
+            ${statCard("Egresos", resumen.egresos, "red")}
+            ${statCard("Saldo", resumen.saldo, "green")}
+          </div>
+        </div>
+      </div>
+
+      <div class="grid grid-2" style="margin-top:16px;">
         <div class="card">
           <h2 class="section-title">Crear chofer</h2>
 
@@ -963,10 +1080,10 @@ function renderAdmin() {
   if (state.adminTab === "movimientos") {
     contenido = `
       <div class="topbar">
-        <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
+        <h2 class="section-title" style="margin:0;">Movimientos</h2>
         <div class="badge">Tiempo real</div>
       </div>
-      ${buildToolbar()}
+      ${buildFiltroPanel()}
       ${renderMovimientosList(true)}
     `;
   }
@@ -982,7 +1099,7 @@ function renderAdmin() {
   }
 
   appRoot.innerHTML = `
-    ${buildHeaderAdmin(resumen)}
+    ${buildHeaderAdmin()}
 
     <div class="container">
       ${mensajeHtml()}
@@ -993,7 +1110,7 @@ function renderAdmin() {
 
   attachTabListeners();
   attachCommonSessionButton();
-  attachToolbarListeners();
+  attachFiltrosListeners();
   attachAdminMovementActions();
 
   const btnGuardar = document.getElementById("btnGuardarMovimiento");
@@ -1039,8 +1156,8 @@ function renderAdmin() {
       }
 
       await crearUsuarioChofer(nombre, numero);
-      setMensaje("Chofer creado correctamente.", "success");
       state.adminTab = "usuarios";
+      setMensaje("Chofer creado correctamente.", "success");
     });
   }
 
@@ -1071,8 +1188,8 @@ function renderAdmin() {
         creado_en: Timestamp.now()
       });
 
-      setMensaje("Administrador creado correctamente.", "success");
       state.adminTab = "usuarios";
+      setMensaje("Administrador creado correctamente.", "success");
     });
   }
 }

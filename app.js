@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import {
   getFirestore,
   collection,
-  addDoc,
+ addDoc,
   getDocs,
   query,
   where,
@@ -35,12 +35,16 @@ const modalClose = document.getElementById("modalClose");
 let usuarioActual = cargarSesion();
 let mensajeActual = { texto: "", tipo: "" };
 let movimientosCache = [];
+let usuariosCache = [];
 let resumenCache = null;
 let unsubscribeMovimientos = null;
+let unsubscribeUsuarios = null;
 
 const state = {
   filtroTipo: "todos",
-  busqueda: ""
+  busqueda: "",
+  adminTab: "resumen",
+  choferTab: "inicio"
 };
 
 if (modalClose) {
@@ -186,29 +190,6 @@ async function crearUsuarioChofer(nombre, numeroEconomico) {
     creado_en: Timestamp.now()
   };
   await addDoc(collection(db, "usuarios"), data);
-}
-
-async function crearAdministradoresIniciales() {
-  const admins = [
-    { nombre: "Presidente", password: "presi123" },
-    { nombre: "Secretario", password: "secre123" },
-    { nombre: "Vigilancia", password: "vigila123" }
-  ];
-
-  for (const admin of admins) {
-    const existente = await obtenerUsuarioPorNombre(admin.nombre);
-    if (!existente) {
-      await addDoc(collection(db, "usuarios"), {
-        nombre: admin.nombre,
-        nombre_key: claveNombre(admin.nombre),
-        rol: "admin",
-        password: admin.password,
-        numero_economico: "",
-        activo: true,
-        creado_en: Timestamp.now()
-      });
-    }
-  }
 }
 
 async function validarLogin(nombre, password) {
@@ -397,6 +378,14 @@ function getMovimientosFiltrados() {
   });
 }
 
+function getUsuariosOrdenados() {
+  return [...usuariosCache].sort((a, b) => {
+    const an = (a.nombre || "").toLowerCase();
+    const bn = (b.nombre || "").toLowerCase();
+    return an.localeCompare(bn);
+  });
+}
+
 function statCard(label, value, cls) {
   return `
     <div class="stat ${cls}">
@@ -410,11 +399,7 @@ function renderMovimientosList(esAdmin = false) {
   const lista = getMovimientosFiltrados();
 
   if (!lista.length) {
-    return `
-      <div class="card empty">
-        No hay movimientos que coincidan con los filtros actuales.
-      </div>
-    `;
+    return `<div class="card empty">No hay movimientos que coincidan con los filtros actuales.</div>`;
   }
 
   return `
@@ -446,16 +431,44 @@ function renderMovimientosList(esAdmin = false) {
             ${
               esAdmin
                 ? `
-                  <div class="actions">
-                    <button class="btn btn-primary js-editar" data-id="${m._id}">Editar</button>
-                    <button class="btn btn-danger js-borrar" data-id="${m._id}">Borrar</button>
-                  </div>
-                `
+                <div class="actions">
+                  <button class="btn btn-primary js-editar" data-id="${m._id}">Editar</button>
+                  <button class="btn btn-danger js-borrar" data-id="${m._id}">Borrar</button>
+                </div>
+              `
                 : ""
             }
           </div>
         `;
       }).join("")}
+    </div>
+  `;
+}
+
+function renderUsuariosList() {
+  const lista = getUsuariosOrdenados();
+
+  if (!lista.length) {
+    return `<div class="card empty">No hay usuarios creados todavía.</div>`;
+  }
+
+  return `
+    <div class="list">
+      ${lista.map((u) => `
+        <div class="movement">
+          <div class="movement-main">
+            <div>
+              <div class="movement-title">${escapeHtml(u.nombre || "Sin nombre")}</div>
+              <div class="movement-subtitle">
+                Rol: ${escapeHtml(u.rol || "")}
+                ${u.numero_economico ? ` | Núm. económico: ${escapeHtml(u.numero_economico)}` : ""}
+                | Estado: ${u.activo === false ? "Inactivo" : "Activo"}
+              </div>
+            </div>
+            <div class="badge">${escapeHtml(u.rol || "usuario")}</div>
+          </div>
+        </div>
+      `).join("")}
     </div>
   `;
 }
@@ -470,6 +483,31 @@ function buildToolbar() {
           <option value="ingreso" ${state.filtroTipo === "ingreso" ? "selected" : ""}>Ingresos</option>
           <option value="egreso" ${state.filtroTipo === "egreso" ? "selected" : ""}>Egresos</option>
         </select>
+      </div>
+    </div>
+  `;
+}
+
+function buildAdminTabs() {
+  return `
+    <div class="card">
+      <div class="btn-row">
+        <button class="btn ${state.adminTab === "resumen" ? "btn-primary" : "btn-soft"} js-admin-tab" data-tab="resumen">Resumen</button>
+        <button class="btn ${state.adminTab === "movimientos" ? "btn-primary" : "btn-soft"} js-admin-tab" data-tab="movimientos">Movimientos</button>
+        <button class="btn ${state.adminTab === "usuarios" ? "btn-primary" : "btn-soft"} js-admin-tab" data-tab="usuarios">Usuarios</button>
+        <button class="btn btn-danger" id="btnCerrarSesion">Cerrar sesión</button>
+      </div>
+    </div>
+  `;
+}
+
+function buildChoferTabs() {
+  return `
+    <div class="card">
+      <div class="btn-row">
+        <button class="btn ${state.choferTab === "inicio" ? "btn-primary" : "btn-soft"} js-chofer-tab" data-tab="inicio">Inicio</button>
+        <button class="btn ${state.choferTab === "movimientos" ? "btn-primary" : "btn-soft"} js-chofer-tab" data-tab="movimientos">Movimientos</button>
+        <button class="btn btn-danger" id="btnCerrarSesion">Cerrar sesión</button>
       </div>
     </div>
   `;
@@ -551,6 +589,22 @@ function buildMovimientoForm(prefill = {}, buttonClass = "btn-accent", buttonTex
   `;
 }
 
+function attachTabListeners() {
+  document.querySelectorAll(".js-admin-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.adminTab = btn.dataset.tab;
+      render();
+    });
+  });
+
+  document.querySelectorAll(".js-chofer-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.choferTab = btn.dataset.tab;
+      render();
+    });
+  });
+}
+
 function attachToolbarListeners() {
   const busquedaInput = document.getElementById("busquedaInput");
   const filtroTipo = document.getElementById("filtroTipo");
@@ -577,26 +631,29 @@ function attachCommonSessionButton() {
       usuarioActual = null;
       limpiarSesion();
       limpiarMensaje();
-      detenerSuscripcionMovimientos();
+      detenerSuscripciones();
+      state.adminTab = "resumen";
+      state.choferTab = "inicio";
       render();
     });
   }
 }
 
-function detenerSuscripcionMovimientos() {
+function detenerSuscripciones() {
   if (typeof unsubscribeMovimientos === "function") {
     unsubscribeMovimientos();
     unsubscribeMovimientos = null;
   }
+  if (typeof unsubscribeUsuarios === "function") {
+    unsubscribeUsuarios();
+    unsubscribeUsuarios = null;
+  }
 }
 
 function iniciarSuscripcionMovimientos() {
-  detenerSuscripcionMovimientos();
+  if (typeof unsubscribeMovimientos === "function") unsubscribeMovimientos();
 
-  const q = query(
-    collection(db, "operaciones_otimac"),
-    orderBy("fecha", "desc")
-  );
+  const q = query(collection(db, "operaciones_otimac"), orderBy("fecha", "desc"));
 
   unsubscribeMovimientos = onSnapshot(
     q,
@@ -606,8 +663,24 @@ function iniciarSuscripcionMovimientos() {
       render();
     },
     (error) => {
-      console.error("Error en suscripción:", error);
-      setMensaje(`Error al leer movimientos en tiempo real: ${error.message}`, "error");
+      console.error("Error en suscripción movimientos:", error);
+      setMensaje(`Error al leer movimientos: ${error.message}`, "error");
+    }
+  );
+}
+
+function iniciarSuscripcionUsuarios() {
+  if (typeof unsubscribeUsuarios === "function") unsubscribeUsuarios();
+
+  unsubscribeUsuarios = onSnapshot(
+    collection(db, "usuarios"),
+    (snapshot) => {
+      usuariosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
+      render();
+    },
+    (error) => {
+      console.error("Error en suscripción usuarios:", error);
+      setMensaje(`Error al leer usuarios: ${error.message}`, "error");
     }
   );
 }
@@ -704,7 +777,7 @@ function renderLogin() {
         <hr class="sep">
 
         <p class="small center" style="margin:0;">
-          Admins sugeridos para crear manualmente:<br>
+          Admins sugeridos:<br>
           <span class="code">Presidente / presi123</span><br>
           <span class="code">Secretario / secre123</span><br>
           <span class="code">Vigilancia / vigila123</span>
@@ -732,11 +805,8 @@ function renderLogin() {
       guardarSesion(usuarioActual);
       limpiarMensaje();
 
-      try {
-        if (!unsubscribeMovimientos) iniciarSuscripcionMovimientos();
-      } catch (e) {
-        console.error("Error al iniciar suscripción:", e);
-      }
+      iniciarSuscripcionMovimientos();
+      iniciarSuscripcionUsuarios();
 
       render();
     } catch (e) {
@@ -753,22 +823,13 @@ function renderChofer() {
     saldo_total: 0
   };
 
-  appRoot.innerHTML = `
-    ${buildHeaderChofer(resumen)}
+  let contenido = "";
 
-    <div class="container">
-      ${mensajeHtml()}
-
+  if (state.choferTab === "inicio") {
+    contenido = `
       <div class="grid grid-2">
         <div class="card">
-          <div class="topbar">
-            <div>
-              <h2 class="section-title">Registro rápido</h2>
-              <div class="badge">Chofer</div>
-            </div>
-            <button id="btnCerrarSesion" class="btn btn-soft">Cerrar sesión</button>
-          </div>
-
+          <h2 class="section-title">Registro rápido</h2>
           ${buildMovimientoForm(
             { numero_economico: usuarioActual?.numero_economico || "" },
             "btn-accent",
@@ -782,39 +843,52 @@ function renderChofer() {
           ${statCard("Saldo total", resumen.saldo_total, "blue")}
         </div>
       </div>
+    `;
+  }
 
-      <div style="margin-top:16px;">
-        <div class="topbar">
-          <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
-        </div>
-        ${buildToolbar()}
-        ${renderMovimientosList(false)}
+  if (state.choferTab === "movimientos") {
+    contenido = `
+      <div class="topbar">
+        <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
       </div>
+      ${buildToolbar()}
+      ${renderMovimientosList(false)}
+    `;
+  }
+
+  appRoot.innerHTML = `
+    ${buildHeaderChofer(resumen)}
+
+    <div class="container">
+      ${mensajeHtml()}
+      ${buildChoferTabs()}
+      ${contenido}
     </div>
   `;
 
+  attachTabListeners();
   attachCommonSessionButton();
   attachToolbarListeners();
 
   const btnGuardar = document.getElementById("btnGuardarMovimiento");
-  if (!btnGuardar) return;
+  if (btnGuardar) {
+    btnGuardar.addEventListener("click", async () => {
+      const tipo = document.getElementById("movTipo").value;
+      const numero = document.getElementById("movNumero").value;
+      const placa = document.getElementById("movPlaca").value;
+      const monto = document.getElementById("movMonto").value;
+      const concepto = document.getElementById("movConcepto").value;
 
-  btnGuardar.addEventListener("click", async () => {
-    const tipo = document.getElementById("movTipo").value;
-    const numero = document.getElementById("movNumero").value;
-    const placa = document.getElementById("movPlaca").value;
-    const monto = document.getElementById("movMonto").value;
-    const concepto = document.getElementById("movConcepto").value;
+      const r = await guardarOperacion(tipo, numero, placa, monto, concepto, usuarioActual);
 
-    const r = await guardarOperacion(tipo, numero, placa, monto, concepto, usuarioActual);
+      if (!r.ok) {
+        setMensaje(r.mensaje, "error");
+        return;
+      }
 
-    if (!r.ok) {
-      setMensaje(r.mensaje, "error");
-      return;
-    }
-
-    setMensaje(r.mensaje, "success");
-  });
+      setMensaje(r.mensaje, "success");
+    });
+  }
 }
 
 function renderAdmin() {
@@ -828,20 +902,10 @@ function renderAdmin() {
     saldo_total: 0
   };
 
-  appRoot.innerHTML = `
-    ${buildHeaderAdmin(resumen)}
+  let contenido = "";
 
-    <div class="container">
-      ${mensajeHtml()}
-
-      <div class="topbar">
-        <div>
-          <h2 class="section-title" style="margin-bottom:4px;">Panel de administración</h2>
-          <div class="muted">Gestión de movimientos, choferes y administradores</div>
-        </div>
-        <button id="btnCerrarSesion" class="btn btn-soft">Cerrar sesión</button>
-      </div>
-
+  if (state.adminTab === "resumen") {
+    contenido = `
       <div class="grid grid-3 stats">
         ${statCard("Ingresos hoy", resumen.ingresos_hoy, "green")}
         ${statCard("Egresos hoy", resumen.egresos_hoy, "red")}
@@ -893,18 +957,41 @@ function renderAdmin() {
           </div>
         </div>
       </div>
+    `;
+  }
 
-      <div style="margin-top:16px;">
-        <div class="topbar">
-          <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
-          <div class="badge">Tiempo real</div>
-        </div>
-        ${buildToolbar()}
-        ${renderMovimientosList(true)}
+  if (state.adminTab === "movimientos") {
+    contenido = `
+      <div class="topbar">
+        <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
+        <div class="badge">Tiempo real</div>
       </div>
+      ${buildToolbar()}
+      ${renderMovimientosList(true)}
+    `;
+  }
+
+  if (state.adminTab === "usuarios") {
+    contenido = `
+      <div class="topbar">
+        <h2 class="section-title" style="margin:0;">Usuarios creados</h2>
+        <div class="badge">${usuariosCache.length} usuarios</div>
+      </div>
+      ${renderUsuariosList()}
+    `;
+  }
+
+  appRoot.innerHTML = `
+    ${buildHeaderAdmin(resumen)}
+
+    <div class="container">
+      ${mensajeHtml()}
+      ${buildAdminTabs()}
+      ${contenido}
     </div>
   `;
 
+  attachTabListeners();
   attachCommonSessionButton();
   attachToolbarListeners();
   attachAdminMovementActions();
@@ -953,6 +1040,7 @@ function renderAdmin() {
 
       await crearUsuarioChofer(nombre, numero);
       setMensaje("Chofer creado correctamente.", "success");
+      state.adminTab = "usuarios";
     });
   }
 
@@ -984,6 +1072,7 @@ function renderAdmin() {
       });
 
       setMensaje("Administrador creado correctamente.", "success");
+      state.adminTab = "usuarios";
     });
   }
 }
@@ -1018,17 +1107,9 @@ async function init() {
     render();
 
     if (usuarioActual) {
-      try {
-        iniciarSuscripcionMovimientos();
-      } catch (e) {
-        console.error("Error con la suscripción:", e);
-        setMensaje("No se pudo conectar con Firestore. Revisa reglas y configuración.", "error");
-      }
+      iniciarSuscripcionMovimientos();
+      iniciarSuscripcionUsuarios();
     }
-
-    // Si luego quieres crear admins automáticos, descomenta esta línea:
-    // await crearAdministradoresIniciales();
-
   } catch (e) {
     console.error("Error al iniciar:", e);
     document.body.innerHTML = `

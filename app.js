@@ -11,30 +11,72 @@ import {
   updateDoc,
   deleteDoc,
   doc,
-  Timestamp
+  Timestamp,
+  onSnapshot
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 /*
   REEMPLAZA ESTO CON TU CONFIG REAL DE FIREBASE WEB
-  La encuentras en:
-  Firebase Console > Configuración del proyecto > Tus apps > Web app
 */
+// Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "TU_API_KEY",
-  authDomain: "TU_PROYECTO.firebaseapp.com",
-  projectId: "TU_PROJECT_ID",
-  storageBucket: "TU_PROYECTO.appspot.com",
-  messagingSenderId: "TU_SENDER_ID",
-  appId: "TU_APP_ID"
+  apiKey: "AIzaSyAvXzB0423tB-WlHFo2T77ijPM__r3BXl4",
+  authDomain: "sistema-otimac.firebaseapp.com",
+  projectId: "sistema-otimac",
+  storageBucket: "sistema-otimac.firebasestorage.app",
+  messagingSenderId: "269859338546",
+  appId: "1:269859338546:web:339e9ef1401e79c8687f2b"
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 const appRoot = document.getElementById("app");
+const modalOverlay = document.getElementById("modalOverlay");
+const modalBody = document.getElementById("modalBody");
+const modalClose = document.getElementById("modalClose");
 
-let usuarioActual = null;
+let usuarioActual = cargarSesion();
 let mensajeActual = { texto: "", tipo: "" };
+let movimientosCache = [];
+let resumenCache = null;
+let unsubscribeMovimientos = null;
+
+const state = {
+  filtroTipo: "todos",
+  busqueda: ""
+};
+
+modalClose.addEventListener("click", cerrarModal);
+modalOverlay.addEventListener("click", (e) => {
+  if (e.target === modalOverlay) cerrarModal();
+});
+
+function guardarSesion(usuario) {
+  localStorage.setItem("otimac_usuario", JSON.stringify(usuario));
+}
+
+function cargarSesion() {
+  try {
+    const raw = localStorage.getItem("otimac_usuario");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function limpiarSesion() {
+  localStorage.removeItem("otimac_usuario");
+}
+
+function escapeHtml(texto) {
+  return String(texto ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
 
 function claveNombre(nombre) {
   return (nombre || "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -42,17 +84,16 @@ function claveNombre(nombre) {
 
 function dinero(valor) {
   const num = Number(valor || 0);
-  return `$${num.toLocaleString("es-MX", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function ahoraLocal() {
-  return new Date();
+  return `$${num.toLocaleString("es-MX", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })}`;
 }
 
 function normalizarFecha(fecha) {
   if (!fecha) return null;
   if (fecha instanceof Timestamp) return fecha.toDate();
-  if (fecha.seconds) return new Date(fecha.seconds * 1000);
+  if (fecha?.seconds) return new Date(fecha.seconds * 1000);
   if (fecha instanceof Date) return fecha;
   return new Date(fecha);
 }
@@ -88,6 +129,10 @@ function inicioDeMes(dt) {
   return x;
 }
 
+function ahoraLocal() {
+  return new Date();
+}
+
 function setMensaje(texto, tipo = "error") {
   mensajeActual = { texto, tipo };
   render();
@@ -95,6 +140,22 @@ function setMensaje(texto, tipo = "error") {
 
 function limpiarMensaje() {
   mensajeActual = { texto: "", tipo: "" };
+}
+
+function mensajeHtml() {
+  if (!mensajeActual.texto) return "";
+  return `<div class="message ${mensajeActual.tipo}">${escapeHtml(mensajeActual.texto)}</div>`;
+}
+
+function abrirModal(titulo, html) {
+  document.getElementById("modalTitle").textContent = titulo;
+  modalBody.innerHTML = html;
+  modalOverlay.classList.remove("hidden");
+}
+
+function cerrarModal() {
+  modalOverlay.classList.add("hidden");
+  modalBody.innerHTML = "";
 }
 
 async function obtenerUsuarioPorNombre(nombre) {
@@ -105,9 +166,7 @@ async function obtenerUsuarioPorNombre(nombre) {
     limit(1)
   );
   const snapshot = await getDocs(q);
-
   if (snapshot.empty) return null;
-
   const d = snapshot.docs[0];
   return { _id: d.id, ...d.data() };
 }
@@ -217,22 +276,10 @@ async function guardarOperacion(tipo, numeroEconomico, placa, monto, concepto, u
       capturado_por: usuario?.nombre || "Sin nombre",
       rol_captura: usuario?.rol || ""
     });
-
     return { ok: true, mensaje: "Movimiento guardado correctamente." };
   } catch (e) {
     return { ok: false, mensaje: `Error al guardar: ${e.message}` };
   }
-}
-
-async function obtenerMovimientos(maximo = 50) {
-  const q = query(
-    collection(db, "operaciones_otimac"),
-    orderBy("fecha", "desc"),
-    limit(maximo)
-  );
-
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map(d => ({ _id: d.id, ...d.data() }));
 }
 
 async function actualizarMovimiento(movId, tipo, numeroEconomico, placa, monto, concepto) {
@@ -267,7 +314,6 @@ async function actualizarMovimiento(movId, tipo, numeroEconomico, placa, monto, 
       concepto,
       editado_en: Timestamp.now()
     });
-
     return { ok: true, mensaje: "Movimiento actualizado correctamente." };
   } catch (e) {
     return { ok: false, mensaje: `Error al actualizar movimiento: ${e.message}` };
@@ -283,7 +329,7 @@ async function borrarMovimiento(movId) {
   }
 }
 
-async function calcularResumen() {
+async function calcularResumenDesdeLista(lista) {
   const resumen = {
     ingresos_hoy: 0,
     egresos_hoy: 0,
@@ -294,14 +340,12 @@ async function calcularResumen() {
     saldo_total: 0
   };
 
-  const snapshot = await getDocs(collection(db, "operaciones_otimac"));
   const ahora = ahoraLocal();
   const desdeHoy = inicioDelDia(ahora);
   const desdeSemana = inicioDeSemana(ahora);
   const desdeMes = inicioDeMes(ahora);
 
-  for (const d of snapshot.docs) {
-    const m = d.data();
+  for (const m of lista) {
     const monto = Number(m.monto || 0);
     const tipo = m.tipo || "";
     const fecha = normalizarFecha(m.fecha);
@@ -330,45 +374,327 @@ async function calcularResumen() {
   return resumen;
 }
 
-function mensajeHtml() {
-  if (!mensajeActual.texto) return "";
-  return `<div class="message ${mensajeActual.tipo}">${mensajeActual.texto}</div>`;
+function getMovimientosFiltrados() {
+  return movimientosCache.filter((m) => {
+    const tipoOk = state.filtroTipo === "todos" ? true : m.tipo === state.filtroTipo;
+
+    const texto = [
+      m.numero_economico || "",
+      m.placa || "",
+      m.concepto || "",
+      m.capturado_por || ""
+    ].join(" ").toLowerCase();
+
+    const busquedaOk = !state.busqueda.trim()
+      ? true
+      : texto.includes(state.busqueda.trim().toLowerCase());
+
+    return tipoOk && busquedaOk;
+  });
 }
 
-function escapeHtml(texto) {
-  return String(texto ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+function statCard(label, value, cls) {
+  return `
+    <div class="stat ${cls}">
+      <div class="stat-label">${escapeHtml(label)}</div>
+      <div class="stat-value">${dinero(value)}</div>
+    </div>
+  `;
 }
 
-async function renderLogin() {
+function renderMovimientosList(esAdmin = false) {
+  const lista = getMovimientosFiltrados();
+
+  if (!lista.length) {
+    return `
+      <div class="card empty">
+        No hay movimientos que coincidan con los filtros actuales.
+      </div>
+    `;
+  }
+
+  return `
+    <div class="list">
+      ${lista.map((m) => {
+        const ingreso = m.tipo === "ingreso";
+        const numero = m.numero_economico || "";
+        const placa = m.placa || "";
+        const concepto = m.concepto || "";
+        const monto = Number(m.monto || 0);
+        const fecha = fechaLegible(m.fecha);
+        const capturadoPor = m.capturado_por || "Sin usuario";
+        const titulo = ingreso && numero ? `Unidad ${escapeHtml(numero)}` : escapeHtml(concepto);
+
+        let subtitulo = `${escapeHtml(concepto)} | ${escapeHtml(fecha)} | ${escapeHtml(capturadoPor)}`;
+        if (placa) subtitulo += ` | Placa: ${escapeHtml(placa)}`;
+
+        return `
+          <div class="movement">
+            <div class="movement-main">
+              <div>
+                <div class="movement-title">${titulo}</div>
+                <div class="movement-subtitle">${subtitulo}</div>
+              </div>
+              <div class="movement-amount ${ingreso ? "ingreso" : "egreso"}">
+                ${ingreso ? "+" : "-"}${dinero(monto)}
+              </div>
+            </div>
+            ${
+              esAdmin
+                ? `
+                  <div class="actions">
+                    <button class="btn btn-primary js-editar" data-id="${m._id}">Editar</button>
+                    <button class="btn btn-danger js-borrar" data-id="${m._id}">Borrar</button>
+                  </div>
+                `
+                : ""
+            }
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function buildToolbar() {
+  return `
+    <div class="card">
+      <div class="toolbar">
+        <input id="busquedaInput" class="input" type="text" placeholder="Buscar por número, placa, concepto o usuario" value="${escapeHtml(state.busqueda)}" />
+        <select id="filtroTipo" class="select">
+          <option value="todos" ${state.filtroTipo === "todos" ? "selected" : ""}>Todos</option>
+          <option value="ingreso" ${state.filtroTipo === "ingreso" ? "selected" : ""}>Ingresos</option>
+          <option value="egreso" ${state.filtroTipo === "egreso" ? "selected" : ""}>Egresos</option>
+        </select>
+      </div>
+    </div>
+  `;
+}
+
+function buildHeaderAdmin(resumen) {
+  return `
+    <div class="header admin">
+      <div class="header-inner">
+        <p class="eyebrow">OTIMAC · Administración</p>
+        <div class="header-main">
+          <div>
+            <h2>${escapeHtml(usuarioActual?.nombre || "")}</h2>
+            <p class="header-sub">Panel de control de caja general</p>
+          </div>
+          <div>
+            <div class="header-sub">Saldo total</div>
+            <div class="header-balance">${dinero(resumen.saldo_total)}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildHeaderChofer(resumen) {
+  return `
+    <div class="header">
+      <div class="header-inner">
+        <p class="eyebrow">OTIMAC · Chofer</p>
+        <div class="header-main">
+          <div>
+            <h2>${escapeHtml(usuarioActual?.nombre || "")}</h2>
+            <p class="header-sub">Captura rápida de movimientos</p>
+          </div>
+          <div>
+            <div class="header-sub">Saldo actual</div>
+            <div class="header-balance">${dinero(resumen.saldo_total)}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildMovimientoForm(prefill = {}, buttonClass = "btn-accent", buttonText = "Guardar movimiento") {
+  return `
+    <div class="field">
+      <label>Tipo de movimiento</label>
+      <select id="movTipo" class="select">
+        <option value="ingreso" ${prefill.tipo === "egreso" ? "" : "selected"}>Ingreso</option>
+        <option value="egreso" ${prefill.tipo === "egreso" ? "selected" : ""}>Egreso</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Número económico</label>
+      <input id="movNumero" class="input" type="text" value="${escapeHtml(prefill.numero_economico || "")}" />
+    </div>
+
+    <div class="field">
+      <label>Placa (opcional)</label>
+      <input id="movPlaca" class="input" type="text" value="${escapeHtml(prefill.placa || "")}" />
+    </div>
+
+    <div class="field">
+      <label>Monto</label>
+      <input id="movMonto" class="input" type="number" step="0.01" value="${escapeHtml(prefill.monto || "")}" />
+    </div>
+
+    <div class="field">
+      <label>Concepto / nota</label>
+      <input id="movConcepto" class="input" type="text" value="${escapeHtml(prefill.concepto || "")}" />
+    </div>
+
+    <div class="btn-row">
+      <button id="btnGuardarMovimiento" class="btn ${buttonClass}">${buttonText}</button>
+    </div>
+  `;
+}
+
+function attachToolbarListeners() {
+  const busquedaInput = document.getElementById("busquedaInput");
+  const filtroTipo = document.getElementById("filtroTipo");
+
+  if (busquedaInput) {
+    busquedaInput.addEventListener("input", (e) => {
+      state.busqueda = e.target.value;
+      render();
+    });
+  }
+
+  if (filtroTipo) {
+    filtroTipo.addEventListener("change", (e) => {
+      state.filtroTipo = e.target.value;
+      render();
+    });
+  }
+}
+
+function attachCommonSessionButton() {
+  const btnCerrarSesion = document.getElementById("btnCerrarSesion");
+  if (btnCerrarSesion) {
+    btnCerrarSesion.addEventListener("click", () => {
+      usuarioActual = null;
+      limpiarSesion();
+      limpiarMensaje();
+      detenerSuscripcionMovimientos();
+      render();
+    });
+  }
+}
+
+function detenerSuscripcionMovimientos() {
+  if (typeof unsubscribeMovimientos === "function") {
+    unsubscribeMovimientos();
+    unsubscribeMovimientos = null;
+  }
+}
+
+function iniciarSuscripcionMovimientos() {
+  detenerSuscripcionMovimientos();
+
+  const q = query(
+    collection(db, "operaciones_otimac"),
+    orderBy("fecha", "desc")
+  );
+
+  unsubscribeMovimientos = onSnapshot(q, async (snapshot) => {
+    movimientosCache = snapshot.docs.map((d) => ({ _id: d.id, ...d.data() }));
+    resumenCache = await calcularResumenDesdeLista(movimientosCache);
+    render();
+  }, (error) => {
+    setMensaje(`Error al leer movimientos en tiempo real: ${error.message}`, "error");
+  });
+}
+
+function openEditarMovimientoModal(mov) {
+  abrirModal(
+    "Editar movimiento",
+    `
+      ${buildMovimientoForm(mov, "btn-primary", "Guardar cambios")}
+      <div id="modalMsg"></div>
+    `
+  );
+
+  const btn = document.getElementById("btnGuardarMovimiento");
+  btn.addEventListener("click", async () => {
+    const tipo = document.getElementById("movTipo").value;
+    const numero = document.getElementById("movNumero").value;
+    const placa = document.getElementById("movPlaca").value;
+    const monto = document.getElementById("movMonto").value;
+    const concepto = document.getElementById("movConcepto").value;
+
+    const r = await actualizarMovimiento(mov._id, tipo, numero, placa, monto, concepto);
+
+    const modalMsg = document.getElementById("modalMsg");
+    if (!r.ok) {
+      modalMsg.innerHTML = `<div class="message error">${escapeHtml(r.mensaje)}</div>`;
+      return;
+    }
+
+    cerrarModal();
+    setMensaje(r.mensaje, "success");
+  });
+}
+
+function attachAdminMovementActions() {
+  document.querySelectorAll(".js-editar").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.id;
+      const mov = movimientosCache.find((x) => x._id === id);
+      if (mov) openEditarMovimientoModal(mov);
+    });
+  });
+
+  document.querySelectorAll(".js-borrar").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const ok = confirm("¿Seguro que deseas borrar este movimiento?");
+      if (!ok) return;
+
+      const r = await borrarMovimiento(id);
+      if (!r.ok) {
+        setMensaje(r.mensaje, "error");
+        return;
+      }
+
+      setMensaje(r.mensaje, "success");
+    });
+  });
+}
+
+function renderLogin() {
   appRoot.innerHTML = `
-    <div class="container">
-      <div class="login-box card center">
-        <h1>Caja General OTIMAC</h1>
-        <p class="small">
-          Choferes: nombre + número económico<br>
-          Administradores: nombre + contraseña propia
-        </p>
+    <div class="login-wrap">
+      <div class="card login-card">
+        <div class="login-logo">💼</div>
+        <div class="center">
+          <h1 style="margin:0 0 8px 0;">Caja General OTIMAC</h1>
+          <p class="small" style="margin:0 0 18px 0;">
+            Choferes: nombre + número económico<br>
+            Administradores: nombre + contraseña propia
+          </p>
+        </div>
+
         ${mensajeHtml()}
+
         <div class="field">
           <label>Nombre</label>
-          <input id="loginNombre" type="text" />
+          <input id="loginNombre" class="input" type="text" />
         </div>
+
         <div class="field">
           <label>Contraseña</label>
-          <input id="loginPassword" type="password" />
+          <input id="loginPassword" class="input" type="password" />
         </div>
-        <button id="btnLogin" class="btn-yellow">Entrar</button>
-        <hr>
-        <p class="small">
+
+        <div class="btn-row">
+          <button id="btnLogin" class="btn btn-accent" style="width:100%;">Entrar</button>
+        </div>
+
+        <hr class="sep">
+
+        <p class="small center" style="margin:0;">
           Admins iniciales:<br>
-          Presidente / presi123<br>
-          Secretario / secre123<br>
-          Vigilancia / vigila123
+          <span class="code">Presidente / presi123</span><br>
+          <span class="code">Secretario / secre123</span><br>
+          <span class="code">Vigilancia / vigila123</span>
         </p>
       </div>
     </div>
@@ -380,13 +706,17 @@ async function renderLogin() {
 
     try {
       const r = await validarLogin(nombre, password);
+
       if (!r.ok) {
         setMensaje(r.mensaje, "error");
         return;
       }
 
       usuarioActual = r.usuario;
+      guardarSesion(usuarioActual);
       limpiarMensaje();
+
+      if (!unsubscribeMovimientos) iniciarSuscripcionMovimientos();
       render();
     } catch (e) {
       setMensaje(`Error de inicio de sesión: ${e.message}`, "error");
@@ -394,158 +724,55 @@ async function renderLogin() {
   });
 }
 
-function tarjetaStat(titulo, valor, clase) {
-  return `
-    <div class="stat ${clase}">
-      <h3>${escapeHtml(titulo)}</h3>
-      <div class="value">${dinero(valor)}</div>
-    </div>
-  `;
-}
-
-function formularioMovimiento(prefill = {}) {
-  return `
-    <div class="card">
-      <h2>Registrar movimiento</h2>
-
-      <div class="field">
-        <label>Tipo de movimiento</label>
-        <select id="movTipo">
-          <option value="ingreso" ${prefill.tipo === "egreso" ? "" : "selected"}>Ingreso</option>
-          <option value="egreso" ${prefill.tipo === "egreso" ? "selected" : ""}>Egreso</option>
-        </select>
-      </div>
-
-      <div class="field">
-        <label>Número económico</label>
-        <input id="movNumero" type="text" value="${escapeHtml(prefill.numero_economico || "")}" />
-      </div>
-
-      <div class="field">
-        <label>Placa (opcional)</label>
-        <input id="movPlaca" type="text" value="${escapeHtml(prefill.placa || "")}" />
-      </div>
-
-      <div class="field">
-        <label>Monto</label>
-        <input id="movMonto" type="number" step="0.01" value="${escapeHtml(prefill.monto || "")}" />
-      </div>
-
-      <div class="field">
-        <label>Concepto / Nota</label>
-        <input id="movConcepto" type="text" value="${escapeHtml(prefill.concepto || "")}" />
-      </div>
-
-      <button id="btnGuardarMovimiento" class="btn-yellow">Guardar movimiento</button>
-    </div>
-  `;
-}
-
-function listaMovimientosHtml(movimientos, esAdmin = false) {
-  if (!movimientos.length) {
-    return `<div class="card">No hay movimientos registrados.</div>`;
-  }
-
-  return movimientos.map(m => {
-    const ingreso = m.tipo === "ingreso";
-    const numero = m.numero_economico || "";
-    const placa = m.placa || "";
-    const concepto = m.concepto || "";
-    const monto = Number(m.monto || 0);
-    const fecha = fechaLegible(m.fecha);
-    const capturadoPor = m.capturado_por || "Sin usuario";
-
-    const titulo = ingreso && numero ? `Unidad ${escapeHtml(numero)}` : escapeHtml(concepto);
-    let subtitulo = `${escapeHtml(concepto)} | ${escapeHtml(fecha)} | ${escapeHtml(capturadoPor)}`;
-    if (placa) subtitulo += ` | Placa: ${escapeHtml(placa)}`;
-
-    return `
-      <div class="movement">
-        <div>
-          <div class="movement-title">${titulo}</div>
-          <div class="movement-subtitle">${subtitulo}</div>
-          ${
-            esAdmin
-              ? `
-                <div class="actions">
-                  <button class="btn-blue btn-editar" data-id="${m._id}">Editar</button>
-                  <button class="btn-red btn-borrar" data-id="${m._id}">Borrar</button>
-                </div>
-              `
-              : ""
-          }
-        </div>
-        <div class="movement-amount ${ingreso ? "ingreso" : "egreso"}">
-          ${ingreso ? "+" : "-"}${dinero(monto)}
-        </div>
-      </div>
-    `;
-  }).join("");
-}
-
-async function renderChofer() {
-  const resumen = await calcularResumen();
-  const movimientos = await obtenerMovimientos(50);
+function renderChofer() {
+  const resumen = resumenCache || {
+    ingresos_hoy: 0,
+    egresos_hoy: 0,
+    saldo_total: 0
+  };
 
   appRoot.innerHTML = `
-    <div class="header">
-      <div class="container">
-        <p>OTIMAC</p>
-        <h2>Chofer: ${escapeHtml(usuarioActual.nombre || "")}</h2>
-        <h1>Saldo actual: ${dinero(resumen.saldo_total)}</h1>
-      </div>
-    </div>
+    ${buildHeaderChofer(resumen)}
 
     <div class="container">
       ${mensajeHtml()}
 
-      <div class="card">
-        <h2>Registro rápido</h2>
-
-        <div class="field">
-          <label>Tipo de movimiento</label>
-          <select id="movTipo">
-            <option value="ingreso">Ingreso</option>
-            <option value="egreso">Egreso</option>
-          </select>
-        </div>
-
-        <div class="field">
-          <label>Número económico</label>
-          <input id="movNumero" type="text" value="${escapeHtml(usuarioActual.numero_economico || "")}" />
-        </div>
-
-        <div class="field">
-          <label>Placa (opcional)</label>
-          <input id="movPlaca" type="text" />
-        </div>
-
-        <div class="field">
-          <label>Monto</label>
-          <input id="movMonto" type="number" step="0.01" />
-        </div>
-
-        <div class="field">
-          <label>Concepto / Nota</label>
-          <input id="movConcepto" type="text" />
-        </div>
-
-        <button id="btnGuardarMovimiento" class="btn-yellow">Guardar movimiento</button>
-      </div>
-
       <div class="grid grid-2">
-        ${tarjetaStat("Ingresos hoy", resumen.ingresos_hoy, "green")}
-        ${tarjetaStat("Egresos hoy", resumen.egresos_hoy, "red")}
+        <div class="card">
+          <div class="topbar">
+            <div>
+              <h2 class="section-title">Registro rápido</h2>
+              <div class="badge">Chofer</div>
+            </div>
+            <button id="btnCerrarSesion" class="btn btn-soft">Cerrar sesión</button>
+          </div>
+
+          ${buildMovimientoForm(
+            { numero_economico: usuarioActual?.numero_economico || "" },
+            "btn-accent",
+            "Guardar movimiento"
+          )}
+        </div>
+
+        <div class="grid stats">
+          ${statCard("Ingresos hoy", resumen.ingresos_hoy, "green")}
+          ${statCard("Egresos hoy", resumen.egresos_hoy, "red")}
+          ${statCard("Saldo total", resumen.saldo_total, "blue")}
+        </div>
       </div>
 
-      <div class="topbar" style="margin-top:16px;">
-        <h2>Movimientos recientes</h2>
-        <button id="btnCerrarSesion" class="btn-gray">Cerrar sesión</button>
+      <div style="margin-top:16px;">
+        <div class="topbar">
+          <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
+        </div>
+        ${buildToolbar()}
+        ${renderMovimientosList(false)}
       </div>
-
-      ${listaMovimientosHtml(movimientos, false)}
     </div>
   `;
+
+  attachCommonSessionButton();
+  attachToolbarListeners();
 
   document.getElementById("btnGuardarMovimiento").addEventListener("click", async () => {
     const tipo = document.getElementById("movTipo").value;
@@ -563,77 +790,99 @@ async function renderChofer() {
 
     setMensaje(r.mensaje, "success");
   });
-
-  document.getElementById("btnCerrarSesion").addEventListener("click", () => {
-    usuarioActual = null;
-    limpiarMensaje();
-    render();
-  });
 }
 
-async function renderAdmin() {
-  const resumen = await calcularResumen();
-  const movimientos = await obtenerMovimientos(50);
+function renderAdmin() {
+  const resumen = resumenCache || {
+    ingresos_hoy: 0,
+    egresos_hoy: 0,
+    ingresos_semana: 0,
+    egresos_semana: 0,
+    ingresos_mes: 0,
+    egresos_mes: 0,
+    saldo_total: 0
+  };
 
   appRoot.innerHTML = `
-    <div class="header admin">
-      <div class="container">
-        <p>OTIMAC - ADMINISTRACIÓN</p>
-        <h2>Administrador: ${escapeHtml(usuarioActual.nombre || "")}</h2>
-        <h1>${dinero(resumen.saldo_total)}</h1>
-      </div>
-    </div>
+    ${buildHeaderAdmin(resumen)}
 
     <div class="container">
       ${mensajeHtml()}
 
-      <div class="grid grid-2">
-        ${tarjetaStat("Ingresos hoy", resumen.ingresos_hoy, "green")}
-        ${tarjetaStat("Egresos hoy", resumen.egresos_hoy, "red")}
-        ${tarjetaStat("Ingresos semana", resumen.ingresos_semana, "green2")}
-        ${tarjetaStat("Egresos semana", resumen.egresos_semana, "red2")}
-        ${tarjetaStat("Ingresos mes", resumen.ingresos_mes, "green3")}
-        ${tarjetaStat("Egresos mes", resumen.egresos_mes, "red3")}
-      </div>
-
-      ${formularioMovimiento()}
-
-      <div class="card">
-        <h2>Crear chofer</h2>
-        <div class="field">
-          <label>Nombre del chofer</label>
-          <input id="choferNombre" type="text" />
-        </div>
-        <div class="field">
-          <label>Número económico / contraseña</label>
-          <input id="choferNumero" type="text" />
-        </div>
-        <button id="btnCrearChofer" class="btn-green">Crear chofer</button>
-      </div>
-
-      <div class="card">
-        <h2>Crear administrador</h2>
-        <div class="field">
-          <label>Nombre del nuevo administrador</label>
-          <input id="adminNombre" type="text" />
-        </div>
-        <div class="field">
-          <label>Contraseña del nuevo administrador</label>
-          <input id="adminPass" type="password" />
-        </div>
-        <button id="btnCrearAdmin" class="btn-blue">Crear administrador</button>
-      </div>
-
       <div class="topbar">
-        <h2>Movimientos recientes (editar / borrar)</h2>
-        <button id="btnCerrarSesion" class="btn-gray">Cerrar sesión</button>
+        <div>
+          <h2 class="section-title" style="margin-bottom:4px;">Panel de administración</h2>
+          <div class="muted">Gestión de movimientos, choferes y administradores</div>
+        </div>
+        <button id="btnCerrarSesion" class="btn btn-soft">Cerrar sesión</button>
       </div>
 
-      <div id="listaMovimientos">
-        ${listaMovimientosHtml(movimientos, true)}
+      <div class="grid grid-3 stats">
+        ${statCard("Ingresos hoy", resumen.ingresos_hoy, "green")}
+        ${statCard("Egresos hoy", resumen.egresos_hoy, "red")}
+        ${statCard("Saldo total", resumen.saldo_total, "blue")}
+        ${statCard("Ingresos semana", resumen.ingresos_semana, "green")}
+        ${statCard("Egresos semana", resumen.egresos_semana, "red")}
+        ${statCard("Ingresos mes", resumen.ingresos_mes, "slate")}
+      </div>
+
+      <div class="grid grid-3" style="margin-top:16px;">
+        <div class="card">
+          <h2 class="section-title">Registrar movimiento</h2>
+          ${buildMovimientoForm({}, "btn-accent", "Guardar movimiento")}
+        </div>
+
+        <div class="card">
+          <h2 class="section-title">Crear chofer</h2>
+
+          <div class="field">
+            <label>Nombre del chofer</label>
+            <input id="choferNombre" class="input" type="text" />
+          </div>
+
+          <div class="field">
+            <label>Número económico / contraseña</label>
+            <input id="choferNumero" class="input" type="text" />
+          </div>
+
+          <div class="btn-row">
+            <button id="btnCrearChofer" class="btn btn-success">Crear chofer</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="section-title">Crear administrador</h2>
+
+          <div class="field">
+            <label>Nombre del nuevo administrador</label>
+            <input id="adminNombre" class="input" type="text" />
+          </div>
+
+          <div class="field">
+            <label>Contraseña del nuevo administrador</label>
+            <input id="adminPass" class="input" type="password" />
+          </div>
+
+          <div class="btn-row">
+            <button id="btnCrearAdmin" class="btn btn-primary">Crear administrador</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:16px;">
+        <div class="topbar">
+          <h2 class="section-title" style="margin:0;">Movimientos recientes</h2>
+          <div class="badge">Tiempo real</div>
+        </div>
+        ${buildToolbar()}
+        ${renderMovimientosList(true)}
       </div>
     </div>
   `;
+
+  attachCommonSessionButton();
+  attachToolbarListeners();
+  attachAdminMovementActions();
 
   document.getElementById("btnGuardarMovimiento").addEventListener("click", async () => {
     const tipo = document.getElementById("movTipo").value;
@@ -703,86 +952,25 @@ async function renderAdmin() {
 
     setMensaje("Administrador creado correctamente.", "success");
   });
-
-  document.getElementById("btnCerrarSesion").addEventListener("click", () => {
-    usuarioActual = null;
-    limpiarMensaje();
-    render();
-  });
-
-  document.querySelectorAll(".btn-borrar").forEach(btn => {
-    btn.addEventListener("click", async (e) => {
-      const id = e.target.dataset.id;
-      const ok = confirm("¿Seguro que deseas borrar este movimiento?");
-      if (!ok) return;
-
-      const r = await borrarMovimiento(id);
-      if (!r.ok) {
-        setMensaje(r.mensaje, "error");
-        return;
-      }
-
-      setMensaje(r.mensaje, "success");
-    });
-  });
-
-  document.querySelectorAll(".btn-editar").forEach(btn => {
-    btn.addEventListener("click", async (e) => {
-      const id = e.target.dataset.id;
-      const mov = movimientos.find(x => x._id === id);
-      if (!mov) return;
-
-      const nuevoTipo = prompt("Tipo (ingreso / egreso):", mov.tipo || "ingreso");
-      if (!nuevoTipo) return;
-
-      const nuevoNumero = prompt("Número económico:", mov.numero_economico || "");
-      if (nuevoNumero === null) return;
-
-      const nuevaPlaca = prompt("Placa:", mov.placa || "");
-      if (nuevaPlaca === null) return;
-
-      const nuevoMonto = prompt("Monto:", mov.monto || "");
-      if (nuevoMonto === null) return;
-
-      const nuevoConcepto = prompt("Concepto:", mov.concepto || "");
-      if (nuevoConcepto === null) return;
-
-      const r = await actualizarMovimiento(
-        id,
-        nuevoTipo.trim(),
-        nuevoNumero,
-        nuevaPlaca,
-        nuevoMonto,
-        nuevoConcepto
-      );
-
-      if (!r.ok) {
-        setMensaje(r.mensaje, "error");
-        return;
-      }
-
-      setMensaje(r.mensaje, "success");
-    });
-  });
 }
 
-async function render() {
+function render() {
   try {
     if (!usuarioActual) {
-      await renderLogin();
+      renderLogin();
       return;
     }
 
     if (usuarioActual.rol === "admin") {
-      await renderAdmin();
+      renderAdmin();
     } else {
-      await renderChofer();
+      renderChofer();
     }
   } catch (e) {
     appRoot.innerHTML = `
       <div class="container">
         <div class="card">
-          <h2>Error</h2>
+          <h2 class="section-title">Error</h2>
           <p>${escapeHtml(e.message)}</p>
         </div>
       </div>
@@ -793,15 +981,20 @@ async function render() {
 async function init() {
   try {
     await crearAdministradoresIniciales();
-    await render();
+
+    if (usuarioActual) {
+      iniciarSuscripcionMovimientos();
+    }
+
+    render();
   } catch (e) {
     appRoot.innerHTML = `
       <div class="container">
         <div class="card">
-          <h2>Error al iniciar</h2>
+          <h2 class="section-title">Error al iniciar</h2>
           <p>${escapeHtml(e.message)}</p>
           <p class="small">
-            Revisa la configuración de Firebase en <code>app.js</code>.
+            Revisa la configuración de Firebase en <span class="code">app.js</span>.
           </p>
         </div>
       </div>
